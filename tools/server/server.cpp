@@ -1655,6 +1655,8 @@ struct server_slot {
     llama_tokens generated_tokens;
 
     common_chat_msg chat_msg;
+    
+    int32_t n_content_tokens = 0;
 
     std::vector<completion_token_output> generated_token_probs;
 
@@ -1743,6 +1745,8 @@ struct server_slot {
         json_schema = json();
         generated_tool_call_ids.clear();
 
+        n_content_tokens = 0;
+
         // clear speculative decoding stats
         n_draft_total = 0;
         n_draft_accepted = 0;
@@ -1790,7 +1794,13 @@ struct server_slot {
         n_remaining = -1;
 
         if (task->params.n_predict != -1) {
-            n_remaining = task->params.n_predict - n_decoded;
+            if (task->params.oaicompat == OAICOMPAT_TYPE_CHAT &&
+                task->params.oaicompat_chat_syntax.reasoning_format != COMMON_REASONING_FORMAT_NONE &&
+                !task->params.oaicompat_chat_syntax.reasoning_in_content) {
+                     n_remaining = task->params.n_predict - n_content_tokens;
+            } else {
+                n_remaining = task->params.n_predict - n_decoded;
+            }
         } else if (global_params.n_predict != -1) {
             n_remaining = global_params.n_predict - n_decoded;
         }
@@ -1854,7 +1864,7 @@ struct server_slot {
         return timings;
     }
 
-    const common_chat_msg & update_chat_msg(std::vector<common_chat_msg_diff> & diffs) {
+    const common_chat_msg & update_chat_msg(std::vector<common_chat_msg_diff> & diffs, const llama_vocab * vocab) {
         GGML_ASSERT(task);
 
         auto previous_msg = chat_msg;
@@ -1867,7 +1877,14 @@ struct server_slot {
             new_msg.set_tool_call_ids(generated_tool_call_ids, gen_tool_call_id);
             chat_msg = new_msg;
             diffs = common_chat_msg_diff::compute_diffs(previous_msg, new_msg.empty() ? previous_msg : new_msg);
-        }
+        
+        if (!chat_msg.content.empty()) {
+            auto content_tokens = common_tokenize(vocab, chat_msg.content, false, false);
+                n_content_tokens = content_tokens.size();
+            } else {
+                n_content_tokens = 0;
+            }
+        }    
         return chat_msg;
     }
 
@@ -3064,7 +3081,7 @@ struct server_context {
             res->content = tkn.text_to_send;
             res->tokens  = { tkn.tok };
 
-            slot.update_chat_msg(res->oaicompat_msg_diffs);
+            slot.update_chat_msg(res->oaicompat_msg_diffs, vocab);
         }
 
         res->n_decoded           = slot.n_decoded;
@@ -3117,7 +3134,7 @@ struct server_context {
         res->oaicompat         = slot.task->params.oaicompat;
         res->oaicompat_model   = slot.task->params.oaicompat_model;
         res->oaicompat_cmpl_id = slot.task->params.oaicompat_cmpl_id;
-        res->oaicompat_msg     = slot.update_chat_msg(res->oaicompat_msg_diffs);
+        res->oaicompat_msg     = slot.update_chat_msg(res->oaicompat_msg_diffs, vocab);
 
         // populate res.probs_output
         if (slot.task->params.sampling.n_probs > 0) {
